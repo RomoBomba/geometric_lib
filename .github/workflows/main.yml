@@ -2,10 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "cicd_382471" ]
+    branches: 
+      -"cicd_382471"
 
   pull_request:
-    branches: [ "main", "cicd_382471" ]
+    branches: 
+      -"cicd_382471" 
 
 jobs:
   build_linux:
