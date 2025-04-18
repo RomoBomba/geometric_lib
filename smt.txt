@@ -1,98 +1,33 @@
 #!/bin/bash
 
-# Файл для хранения текущего значения
-VALUE_FILE="/tmp/consensus_value"
-LEADER_FILE="/tmp/leader_pid"
-PROCESSES=()
+set -euo pipefail
 
-# Функция для выбора лидера
-select_leader() {
-    echo "Выбираем нового лидера..."
-    if [[ ${#PROCESSES[@]} -gt 0 ]]; then
-        echo "${PROCESSES[0]}" > "$LEADER_FILE"
-        echo "Новый лидер: ${PROCESSES[0]}"
-    else
-        echo "Нет доступных процессов для выбора лидера"
-    fi
-}
-
-# Функция обновления значения (только лидер может обновлять)
-update_value() {
-    local sender_pid=$1
-    local new_value=$2
-    local leader_pid=$(cat "$LEADER_FILE" 2>/dev/null)
-    if [[ "$sender_pid" == "$leader_pid" ]]; then
-        echo "$new_value" > "$VALUE_FILE"
-        echo "Значение обновлено лидером ($leader_pid) на $new_value"
-    else
-        echo "Ошибка: Только лидер ($leader_pid) может обновлять значение"
-    fi
-}
-
-# Функция чтения значения
-read_value() {
-    if [[ -f "$VALUE_FILE" ]]; then
-        cat "$VALUE_FILE"
-    else
-        echo "Значение не установлено"
-    fi
-}
-
-# Функция обработки сбоя процесса
-handle_failure() {
-    local failed_pid=$1
-    echo "Процесс $failed_pid упал! Перевод всех в режим read-only."
-    PROCESSES=( $(pgrep -f "bash $0 process") )
-    if [[ -f "$LEADER_FILE" && $(cat "$LEADER_FILE") == "$failed_pid" ]]; then
-        select_leader
-    fi
-}
-
-# Функция имитации процесса
-process() {
-    local pid=$$
-    PROCESSES+=("$pid")
-    echo "Процесс $pid запущен."
-    if [[ ! -f "$LEADER_FILE" ]]; then
-        select_leader
-    fi
-    
-    while true; do
-        sleep 5 & wait $!
-    done
-}
-
-# Запуск процессов
-if [[ "$1" == "process" ]]; then
-    process
-    exit 0
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <filename>"
+    exit 1
 fi
 
-# Команды управления
-case "$1" in
-    start)
-        rm -f "$VALUE_FILE" "$LEADER_FILE"
-        for i in {1..3}; do
-            bash "$0" process &
-        done
-        sleep 2
-        ;;
-    update)
-        update_value "$2" "$3"
-        ;;
-    read)
-        read_value
-        ;;
-    fail)
-        kill -9 "$2"
-        handle_failure "$2"
-        ;;
-    status)
-        echo "Текущие процессы:" "$(pgrep -f "bash $0 process")"
-        echo "Текущий лидер: $(cat "$LEADER_FILE" 2>/dev/null)"
-        echo "Текущее значение: $(read_value)"
-        ;;
-    *)
-        echo "Использование: $0 {start|update <pid> <value>|read|fail <pid>|status}"
-        ;;
-esac
+filename="$1"
+filepath="$(realpath -- "$filename" 2>/dev/null || true)"
+
+if [ ! -f "$filepath" ]; then
+    echo "Error: File '$filename' not found or is not a regular file."
+    exit 2
+fi
+
+mkdir -p "$HOME/.trash"
+touch "$HOME/.trash.log"
+
+linkname=1
+while [ -e "$HOME/.trash/$linkname" ]; do
+    ((linkname++))
+done
+
+if ln -- "$filepath" "$HOME/.trash/$linkname"; then
+    echo "$filepath $linkname" >> "$HOME/.trash.log"
+    rm -- "$filepath"
+    echo "Moved '$filepath' to trash as '$linkname'"
+else
+    echo "Error: Could not create hard link. Are you on different filesystems?"
+    exit 3
+fi
