@@ -1,41 +1,25 @@
 #!/bin/bash
+# upback.sh
 
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <filename>"
+RESTORE_DIR="/home/user/restore"
+mkdir -p "$RESTORE_DIR"
+
+latest_backup=$(find /home/user -maxdepth 1 -type d -name 'Backup-*' | sort -r | head -n 1)
+
+if [ -z "$latest_backup" ]; then
+    echo "No backup found."
     exit 1
 fi
 
-file="$1"
-file_path="$(realpath -- "$file" 2>/dev/null || true)"
-
-if [ ! -f "$file_path" ]; then
-    echo "Error: '$file' is not a valid file."
-    exit 1
-fi
-
-mkdir -p "$HOME/.trash"
-touch "$HOME/.trash.log"
-
-n=1
-while [ -e "$HOME/.trash/$n" ]; do
-    ((n++))
+for file in "$latest_backup"/*; do
+    name=$(basename "$file")
+    # исключаем версионные файлы
+    if [[ "$name" =~ \.[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        continue
+    fi
+    cp "$file" "$RESTORE_DIR/$name"
 done
 
-# Сначала пробуем создать жёсткую ссылку
-if ln "$file_path" "$HOME/.trash/$n" 2>/dev/null; then
-    echo "$file_path $n" >> "$HOME/.trash.log"
-    rm "$file_path"
-    echo "Moved '$file_path' to ~/.trash as '$n'"
-else
-    echo "Warning: Hard link failed (maybe different FS). Trying copy..."
-    if cp "$file_path" "$HOME/.trash/$n"; then
-        echo "$file_path $n" >> "$HOME/.trash.log"
-        rm "$file_path"
-        echo "Copied and removed '$file_path' as trash/$n"
-    else
-        echo "Error: Cannot move file '$file_path' to trash."
-        exit 2
-    fi
-fi
+echo "Restored files from $(basename "$latest_backup") to $RESTORE_DIR"
