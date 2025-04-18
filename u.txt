@@ -9,10 +9,11 @@ fi
 
 filename="$1"
 
-TRASH_DIR="$HOME/.trash"
-TRASH_LOG="$HOME/.trash.log"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TRASH_DIR="$SCRIPT_DIR/trash"
+LOG_FILE="$SCRIPT_DIR/trash.log"
 
-if [ ! -f "$TRASH_LOG" ]; then
+if [ ! -f "$LOG_FILE" ]; then
     echo "No trash log found."
     exit 0
 fi
@@ -22,7 +23,6 @@ found=false
 while IFS= read -r line || [ -n "$line" ]; do
     file_path="${line% *}"
     trash_name="${line##* }"
-
     base_name="$(basename "$file_path")"
 
     if [ "$base_name" != "$filename" ]; then
@@ -30,55 +30,49 @@ while IFS= read -r line || [ -n "$line" ]; do
     fi
 
     found=true
-
     echo "Found: $file_path"
-    while true; do
-        read -rp "Restore this file? [y/N] " response
-        case "$response" in
-            [yY][eE][sS]|[yY])
-                dir_path=$(dirname "$file_path")
-                new_path="$dir_path/$base_name"
+    echo -n "Restore this file? [y/N] " > /dev/tty
+    read -r response < /dev/tty
 
-                # Если директории не существует — восстанавливаем в $HOME
-                if [ ! -d "$dir_path" ]; then
-                    echo "Original directory '$dir_path' does not exist."
-                    dir_path="$HOME"
-                    new_path="$dir_path/$base_name"
-                fi
+    case "$response" in
+        [yY][eE][sS]|[yY])
+            dir_path=$(dirname "$file_path")
+            target_path="$file_path"
 
-                # Проверка на конфликт имён
-                if [ -e "$new_path" ]; then
-                    echo "File '$new_path' already exists."
-                    while true; do
-                        read -rp "Enter new name: " new_name
-                        new_path="$dir_path/$new_name"
-                        if [ ! -e "$new_path" ]; then
-                            break
-                        fi
-                        echo "That file also exists."
-                    done
-                fi
+            # если оригинальная директория не существует — восстанавливаем в текущую
+            if [ ! -d "$dir_path" ]; then
+                echo "Original directory missing. Restoring to current directory."
+                target_path="./$base_name"
+            fi
 
-                if [ -e "$TRASH_DIR/$trash_name" ]; then
-                    ln "$TRASH_DIR/$trash_name" "$new_path"
-                    rm "$TRASH_DIR/$trash_name"
-                    sed -i "\|$file_path $trash_name\$|d" "$TRASH_LOG"
-                    echo "File restored to: $new_path"
-                else
-                    echo "Error: File '$trash_name' in trash not found."
-                fi
-                break
-                ;;
-            [nN][oO]|[nN])
-                break
-                ;;
-            *)
-                echo "Please enter yes or no (y/n)."
-                ;;
-        esac
-    done
-done < "$TRASH_LOG"
+            # если файл уже существует — спросим новое имя
+            if [ -e "$target_path" ]; then
+                echo "File '$target_path' already exists."
+                while true; do
+                    echo -n "Enter new name: " > /dev/tty
+                    read -r new_name < /dev/tty
+                    target_path="$(dirname "$target_path")/$new_name"
+                    if [ ! -e "$target_path" ]; then
+                        break
+                    fi
+                    echo "That file also exists." > /dev/tty
+                done
+            fi
+
+            if [ -e "$TRASH_DIR/$trash_name" ]; then
+                mv "$TRASH_DIR/$trash_name" "$target_path"
+                sed -i "\|$file_path $trash_name\$|d" "$LOG_FILE"
+                echo "File restored to: $target_path"
+            else
+                echo "Trash file '$trash_name' not found."
+            fi
+            ;;
+        * )
+            echo "Skipping..."
+            ;;
+    esac
+done < "$LOG_FILE"
 
 if ! $found; then
-    echo "No entries found for filename '$filename' in trash."
+    echo "No entries found for filename '$filename'."
 fi
