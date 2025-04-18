@@ -8,26 +8,52 @@ if [ $# -ne 1 ]; then
 fi
 
 filename="$1"
-filepath="$(realpath -- "$filename" 2>/dev/null || true)"
 
-if [ ! -f "$filepath" ]; then
-    echo "Error: File '$filename' not found or is not a regular file."
-    exit 2
+if [ ! -f "$HOME/.trash.log" ]; then
+    echo "No trash log found."
+    exit 0
 fi
 
-mkdir -p "$HOME/.trash"
-touch "$HOME/.trash.log"
+grep -a -- " $(printf '%q' "$filename")\$" "$HOME/.trash.log" | while read -r line; do
+    filepath="${line% *}"
+    linkname="${line##* }"
+    dirpath=$(dirname "$filepath")
+    base=$(basename "$filepath")
 
-linkname=1
-while [ -e "$HOME/.trash/$linkname" ]; do
-    ((linkname++))
+    echo "Found: $filepath"
+    read -rp "Restore this file? [y/N] " answer
+    case "$answer" in
+        [yY]* )
+            if [ ! -e "$HOME/.trash/$linkname" ]; then
+                echo "Warning: Trash file '$linkname' not found."
+                continue
+            fi
+
+            if [ ! -d "$dirpath" ]; then
+                echo "Directory '$dirpath' does not exist. Restoring to home directory."
+                dirpath="$HOME"
+            fi
+
+            target="$dirpath/$base"
+            if [ -e "$target" ]; then
+                echo "File '$target' already exists."
+                while true; do
+                    read -rp "Enter new name: " newname
+                    target="$dirpath/$newname"
+                    if [ ! -e "$target" ]; then
+                        break
+                    fi
+                done
+            fi
+
+            if ln "$HOME/.trash/$linkname" "$target"; then
+                rm "$HOME/.trash/$linkname"
+                sed -i "\|$filepath $linkname\$|d" "$HOME/.trash.log"
+                echo "File restored to $target"
+            else
+                echo "Error: Failed to restore file."
+            fi
+            ;;
+        * ) ;;
+    esac
 done
-
-if ln -- "$filepath" "$HOME/.trash/$linkname"; then
-    echo "$filepath $linkname" >> "$HOME/.trash.log"
-    rm -- "$filepath"
-    echo "Moved '$filepath' to trash as '$linkname'"
-else
-    echo "Error: Could not create hard link. Are you on different filesystems?"
-    exit 3
-fi
