@@ -1,0 +1,84 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <filename>"
+    exit 1
+fi
+
+filename="$1"
+
+TRASH_DIR="$HOME/.trash"
+TRASH_LOG="$HOME/.trash.log"
+
+if [ ! -f "$TRASH_LOG" ]; then
+    echo "No trash log found."
+    exit 0
+fi
+
+found=false
+
+while IFS= read -r line || [ -n "$line" ]; do
+    file_path="${line% *}"
+    trash_name="${line##* }"
+
+    base_name="$(basename "$file_path")"
+
+    if [ "$base_name" != "$filename" ]; then
+        continue
+    fi
+
+    found=true
+
+    echo "Found: $file_path"
+    while true; do
+        read -rp "Restore this file? [y/N] " response
+        case "$response" in
+            [yY][eE][sS]|[yY])
+                dir_path=$(dirname "$file_path")
+                new_path="$dir_path/$base_name"
+
+                # Если директории не существует — восстанавливаем в $HOME
+                if [ ! -d "$dir_path" ]; then
+                    echo "Original directory '$dir_path' does not exist."
+                    dir_path="$HOME"
+                    new_path="$dir_path/$base_name"
+                fi
+
+                # Проверка на конфликт имён
+                if [ -e "$new_path" ]; then
+                    echo "File '$new_path' already exists."
+                    while true; do
+                        read -rp "Enter new name: " new_name
+                        new_path="$dir_path/$new_name"
+                        if [ ! -e "$new_path" ]; then
+                            break
+                        fi
+                        echo "That file also exists."
+                    done
+                fi
+
+                if [ -e "$TRASH_DIR/$trash_name" ]; then
+                    ln "$TRASH_DIR/$trash_name" "$new_path"
+                    rm "$TRASH_DIR/$trash_name"
+                    sed -i "\|$file_path $trash_name\$|d" "$TRASH_LOG"
+                    echo "File restored to: $new_path"
+                else
+                    echo "Error: File '$trash_name' in trash not found."
+                fi
+                break
+                ;;
+            [nN][oO]|[nN])
+                break
+                ;;
+            *)
+                echo "Please enter yes or no (y/n)."
+                ;;
+        esac
+    done
+done < "$TRASH_LOG"
+
+if ! $found; then
+    echo "No entries found for filename '$filename' in trash."
+fi
