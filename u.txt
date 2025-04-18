@@ -9,7 +9,10 @@ if [ -z "$file_name" ]; then
     exit 1
 fi
 
-if [ ! -f "$HOME/.trash.log" ]; then
+TRASH_DIR="$HOME/.trash"
+LOG_FILE="$HOME/.trash.log"
+
+if [ ! -f "$LOG_FILE" ]; then
     echo "Trash log not found."
     exit 1
 fi
@@ -28,52 +31,51 @@ while IFS= read -r line || [ -n "$line" ]; do
 
     found=true
     echo "Found: $file_path"
-    while true; do
-        read -r -p "Do you want to restore $file_path? [y/N] " response
-        case "$response" in
-            [yY][eE][sS]|[yY])
-                if [ ! -d "$dir" ]; then
-                    echo "Directory $dir not found. Restoring to home directory."
-                    dir="$HOME"
-                fi
 
-                target="$dir/$cur_file_name"
-                if [ -f "$target" ]; then
-                    echo "File '$target' already exists."
-                    while true; do
-                        read -r -p "Please enter a new name: " new_name
-                        target="$dir/$new_name"
-                        if [ ! -e "$target" ]; then
-                            break
-                        fi
-                        echo "File '$target' also exists."
-                    done
-                fi
+    # читаем ввод надёжно
+    echo -n "Do you want to restore this file? [y/N] " > /dev/tty
+    read -r response < /dev/tty
 
-                if [ ! -f "$HOME/.trash/$trash_name" ]; then
-                    echo "Error: trash file '$trash_name' not found."
-                    break
-                fi
+    case "$response" in
+        [yY][eE][sS]|[yY])
+            if [ ! -d "$dir" ]; then
+                echo "Directory '$dir' not found. Restoring to home directory."
+                dir="$HOME"
+            fi
 
-                if ln "$HOME/.trash/$trash_name" "$target" 2>/dev/null || cp "$HOME/.trash/$trash_name" "$target"; then
-                    rm "$HOME/.trash/$trash_name"
-                    sed -i "\|$file_path $trash_name\$|d" "$HOME/.trash.log"
-                    echo "File restored to '$target'"
-                else
-                    echo "Error: failed to restore file."
-                fi
+            target="$dir/$cur_file_name"
+            if [ -f "$target" ]; then
+                echo "File '$target' already exists."
+                while true; do
+                    echo -n "Please enter a new name: " > /dev/tty
+                    read -r new_name < /dev/tty
+                    target="$dir/$new_name"
+                    if [ ! -e "$target" ]; then
+                        break
+                    fi
+                    echo "File '$target' also exists." > /dev/tty
+                done
+            fi
+
+            if [ ! -f "$TRASH_DIR/$trash_name" ]; then
+                echo "Error: trash file '$trash_name' not found."
                 break
-                ;;
-            [nN][oO]|[nN])
-                echo "Skipping..."
-                break
-                ;;
-            *)
-                echo "Please answer yes or no (y/n)."
-                ;;
-        esac
-    done
-done < "$HOME/.trash.log"
+            fi
+
+            # восстанавливаем: ln если можно, иначе cp
+            if ln "$TRASH_DIR/$trash_name" "$target" 2>/dev/null || cp "$TRASH_DIR/$trash_name" "$target"; then
+                rm "$TRASH_DIR/$trash_name"
+                sed -i "\|$file_path $trash_name\$|d" "$LOG_FILE"
+                echo "File restored to '$target'"
+            else
+                echo "Error: failed to restore file."
+            fi
+            ;;
+        * )
+            echo "Skipping..."
+            ;;
+    esac
+done < "$LOG_FILE"
 
 if ! $found; then
     echo "No entries found for filename '$file_name'."
