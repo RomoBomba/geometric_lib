@@ -2,58 +2,57 @@
 
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <filename>"
-    exit 1
+SOURCE="/home/user/source"
+REPORT="/home/user/backup-report"
+BACKUP_DIR="/home/user"
+
+mkdir -p "$SOURCE"
+touch "$REPORT"
+
+latest_backup=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'Backup-*' \
+    | sort -r | head -n 1)
+backup_date=$(basename "$latest_backup" 2>/dev/null | cut -d- -f2-)
+
+today=$(date +%F)
+backup_age_days=8
+make_new_backup=true
+
+if [ -n "$backup_date" ]; then
+    seconds_since=$(($(date +%s) - $(date -d "$backup_date" +%s)))
+    if [ $seconds_since -lt $((backup_age_days * 86400)) ]; then
+        make_new_backup=false
+    fi
 fi
 
-filename="$1"
-
-if [ ! -f "$HOME/.trash.log" ]; then
-    echo "No trash log found."
-    exit 0
+if $make_new_backup; then
+    new_dir="$BACKUP_DIR/Backup-$today"
+    mkdir "$new_dir"
+    echo "[$today] new backup folder created: Backup-$today" >> "$REPORT"
+    for file in "$SOURCE"/*; do
+        [ -f "$file" ] || continue
+        cp "$file" "$new_dir/"
+        echo "$(basename "$file")" >> "$REPORT"
+    done
+else
+    echo "[$today] updating backup folder: Backup-$backup_date" >> "$REPORT"
+    new_files=""
+    updated_files=""
+    for file in "$SOURCE"/*; do
+        [ -f "$file" ] || continue
+        base=$(basename "$file")
+        backup_file="$latest_backup/$base"
+        if [ ! -f "$backup_file" ]; then
+            cp "$file" "$latest_backup/"
+            new_files+="$base\n"
+        else
+            orig_size=$(stat -c %s "$backup_file")
+            new_size=$(stat -c %s "$file")
+            if [ "$orig_size" -ne "$new_size" ]; then
+                mv "$backup_file" "$backup_file.$today"
+                cp "$file" "$latest_backup/"
+                updated_files+="$base $base.$today\n"
+            fi
+        fi
+    done
+    echo -e "$new_files$updated_files" >> "$REPORT"
 fi
-
-grep -a -- " $(printf '%q' "$filename")\$" "$HOME/.trash.log" | while read -r line; do
-    filepath="${line% *}"
-    linkname="${line##* }"
-    dirpath=$(dirname "$filepath")
-    base=$(basename "$filepath")
-
-    echo "Found: $filepath"
-    read -rp "Restore this file? [y/N] " answer
-    case "$answer" in
-        [yY]* )
-            if [ ! -e "$HOME/.trash/$linkname" ]; then
-                echo "Warning: Trash file '$linkname' not found."
-                continue
-            fi
-
-            if [ ! -d "$dirpath" ]; then
-                echo "Directory '$dirpath' does not exist. Restoring to home directory."
-                dirpath="$HOME"
-            fi
-
-            target="$dirpath/$base"
-            if [ -e "$target" ]; then
-                echo "File '$target' already exists."
-                while true; do
-                    read -rp "Enter new name: " newname
-                    target="$dirpath/$newname"
-                    if [ ! -e "$target" ]; then
-                        break
-                    fi
-                done
-            fi
-
-            if ln "$HOME/.trash/$linkname" "$target"; then
-                rm "$HOME/.trash/$linkname"
-                sed -i "\|$filepath $linkname\$|d" "$HOME/.trash.log"
-                echo "File restored to $target"
-            else
-                echo "Error: Failed to restore file."
-            fi
-            ;;
-        * ) ;;
-    esac
-done
