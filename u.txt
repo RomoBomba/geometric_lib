@@ -1,82 +1,63 @@
 #!/bin/bash
+# backup.sh
 
 set -euo pipefail
 
-file_name="$1"
+SRC_DIR="/home/user/source"
+BACKUP_ROOT="/home/user"
+REPORT_FILE="/home/user/backup-report"
+TODAY=$(date +%F)
 
-if [ -z "$file_name" ]; then
-    echo "Usage: $0 <filename>"
-    exit 1
+mkdir -p "$SRC_DIR"
+touch "$REPORT_FILE"
+
+# Найти самый свежий backup каталог
+latest_backup=$(find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'Backup-*' | sort -r | head -n 1)
+
+if [ -n "$latest_backup" ]; then
+    backup_date=$(basename "$latest_backup" | cut -d- -f2-)
+    seconds_diff=$(( $(date +%s) - $(date -d "$backup_date" +%s) ))
+else
+    seconds_diff=$((8 * 86400))
+    backup_date="1970-01-01"
 fi
 
-TRASH_DIR="$HOME/.trash"
-LOG_FILE="$HOME/.trash.log"
+if [ "$seconds_diff" -ge $((7 * 86400)) ]; then
+    # Создание нового бэкапа
+    new_backup="$BACKUP_ROOT/Backup-$TODAY"
+    mkdir "$new_backup"
+    echo "[$TODAY] new backup folder created: Backup-$TODAY" >> "$REPORT_FILE"
 
-if [ ! -f "$LOG_FILE" ]; then
-    echo "Trash log not found."
-    exit 1
-fi
+    for file in "$SRC_DIR"/*; do
+        [ -f "$file" ] || continue
+        cp "$file" "$new_backup"
+        echo "$(basename "$file")" >> "$REPORT_FILE"
+    done
+else
+    # Обновление существующего бэкапа
+    echo "[$TODAY] updating backup folder: Backup-$backup_date" >> "$REPORT_FILE"
+    new_backup="$BACKUP_ROOT/Backup-$backup_date"
+    new_files=""
+    updated_files=""
 
-found=false
+    for file in "$SRC_DIR"/*; do
+        [ -f "$file" ] || continue
+        base="$(basename "$file")"
+        target="$new_backup/$base"
 
-while IFS= read -r line || [ -n "$line" ]; do 
-    trash_name="${line##* }"
-    file_path="${line% $trash_name}"
-    cur_file_name="$(basename "$file_path")"
-    dir="$(dirname "$file_path")"
-
-    if [ "$cur_file_name" != "$file_name" ]; then
-        continue
-    fi
-
-    found=true
-    echo "Found: $file_path"
-
-    # читаем ввод надёжно
-    echo -n "Do you want to restore this file? [y/N] " > /dev/tty
-    read -r response < /dev/tty
-
-    case "$response" in
-        [yY][eE][sS]|[yY])
-            if [ ! -d "$dir" ]; then
-                echo "Directory '$dir' not found. Restoring to home directory."
-                dir="$HOME"
+        if [ ! -f "$target" ]; then
+            cp "$file" "$target"
+            new_files+="$base\n"
+        else
+            orig_size=$(stat -c %s "$target")
+            new_size=$(stat -c %s "$file")
+            if [ "$orig_size" -ne "$new_size" ]; then
+                mv "$target" "$target.$TODAY"
+                cp "$file" "$target"
+                updated_files+="$base $base.$TODAY\n"
             fi
+        fi
+    done
 
-            target="$dir/$cur_file_name"
-            if [ -f "$target" ]; then
-                echo "File '$target' already exists."
-                while true; do
-                    echo -n "Please enter a new name: " > /dev/tty
-                    read -r new_name < /dev/tty
-                    target="$dir/$new_name"
-                    if [ ! -e "$target" ]; then
-                        break
-                    fi
-                    echo "File '$target' also exists." > /dev/tty
-                done
-            fi
-
-            if [ ! -f "$TRASH_DIR/$trash_name" ]; then
-                echo "Error: trash file '$trash_name' not found."
-                break
-            fi
-
-            # восстанавливаем: ln если можно, иначе cp
-            if ln "$TRASH_DIR/$trash_name" "$target" 2>/dev/null || cp "$TRASH_DIR/$trash_name" "$target"; then
-                rm "$TRASH_DIR/$trash_name"
-                sed -i "\|$file_path $trash_name\$|d" "$LOG_FILE"
-                echo "File restored to '$target'"
-            else
-                echo "Error: failed to restore file."
-            fi
-            ;;
-        * )
-            echo "Skipping..."
-            ;;
-    esac
-done < "$LOG_FILE"
-
-if ! $found; then
-    echo "No entries found for filename '$file_name'."
+    echo -e "$new_files$updated_files" >> "$REPORT_FILE"
 fi
