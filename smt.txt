@@ -2,57 +2,45 @@
 
 set -euo pipefail
 
-SOURCE="/home/user/source"
-REPORT="/home/user/backup-report"
-BACKUP_DIR="/home/user"
-
-mkdir -p "$SOURCE"
-touch "$REPORT"
-
-latest_backup=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'Backup-*' \
-    | sort -r | head -n 1)
-backup_date=$(basename "$latest_backup" 2>/dev/null | cut -d- -f2-)
-
-today=$(date +%F)
-backup_age_days=8
-make_new_backup=true
-
-if [ -n "$backup_date" ]; then
-    seconds_since=$(($(date +%s) - $(date -d "$backup_date" +%s)))
-    if [ $seconds_since -lt $((backup_age_days * 86400)) ]; then
-        make_new_backup=false
-    fi
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <filename>"
+    exit 1
 fi
 
-if $make_new_backup; then
-    new_dir="$BACKUP_DIR/Backup-$today"
-    mkdir "$new_dir"
-    echo "[$today] new backup folder created: Backup-$today" >> "$REPORT"
-    for file in "$SOURCE"/*; do
-        [ -f "$file" ] || continue
-        cp "$file" "$new_dir/"
-        echo "$(basename "$file")" >> "$REPORT"
-    done
+filename="$1"
+filepath="$(realpath -- "$filename" 2>/dev/null || true)"
+
+if [ ! -f "$filepath" ]; then
+    echo "Error: File '$filename' not found."
+    exit 2
+fi
+
+# Используем текущую директорию
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TRASH_DIR="$SCRIPT_DIR/trash"
+LOG_FILE="$SCRIPT_DIR/trash.log"
+
+mkdir -p "$TRASH_DIR"
+touch "$LOG_FILE"
+
+# Найти свободное имя
+n=1
+while [ -e "$TRASH_DIR/$n" ]; do
+    ((n++))
+done
+
+if ln "$filepath" "$TRASH_DIR/$n" 2>/dev/null; then
+    echo "$filepath $n" >> "$LOG_FILE"
+    rm "$filepath"
+    echo "Moved '$filepath' to trash as '$n'"
 else
-    echo "[$today] updating backup folder: Backup-$backup_date" >> "$REPORT"
-    new_files=""
-    updated_files=""
-    for file in "$SOURCE"/*; do
-        [ -f "$file" ] || continue
-        base=$(basename "$file")
-        backup_file="$latest_backup/$base"
-        if [ ! -f "$backup_file" ]; then
-            cp "$file" "$latest_backup/"
-            new_files+="$base\n"
-        else
-            orig_size=$(stat -c %s "$backup_file")
-            new_size=$(stat -c %s "$file")
-            if [ "$orig_size" -ne "$new_size" ]; then
-                mv "$backup_file" "$backup_file.$today"
-                cp "$file" "$latest_backup/"
-                updated_files+="$base $base.$today\n"
-            fi
-        fi
-    done
-    echo -e "$new_files$updated_files" >> "$REPORT"
+    echo "Hard link failed (maybe different FS), trying copy..."
+    if cp "$filepath" "$TRASH_DIR/$n"; then
+        echo "$filepath $n" >> "$LOG_FILE"
+        rm "$filepath"
+        echo "Copied and removed '$filepath' as trash/$n"
+    else
+        echo "Error: Could not move file"
+        exit 3
+    fi
 fi
