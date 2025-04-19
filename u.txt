@@ -1,27 +1,30 @@
 #!/bin/bash
 
-set -euo pipefail
+set -e
 
-RESTORE_DIR="/home/user/restore"
-mkdir -p "$RESTORE_DIR"
+echo "Создание необычных файлов и каталогов..."
 
-latest_backup=$(find /home/user -maxdepth 1 -type d -name 'Backup-*' 2>/dev/null | sort -r | head -n 1)
+touch "file with spaces.txt"
+touch "d d"
+mkdir "dir with space"
 
-if [ -z "$latest_backup" ]; then
-    echo "No backup found." >&2
-    exit 1
-fi
+touch "-g"
+touch "\\path\\file"
+touch "??.txt"
+touch "&.txt"
+touch "|file|.txt"
+touch "#abc.txt"
+touch "'quote'.txt"
 
-for file in "$latest_backup"/*; do
-    name=$(basename "$file")
-    # исключаем файлы с версионным расширением (например, file.txt.2025-04-18)
-    if [[ "$name" =~ \.[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-        continue
-    fi
-    if ! cp -- "$file" "$RESTORE_DIR/$name"; then
-        echo "Warning: Failed to restore file '$name'" >&2
-    fi
+touch ./--file.txt
 
-done
+touch $'file\nname.txt'
 
-echo "Restored files from $(basename "$latest_backup") to $RESTORE_DIR"
+mkdir -p "dir with space/subdir?"
+mkdir -p $'nested\ndir'
+
+touch "dir with space/subdir?/subfile#.txt"
+touch $'nested\ndir/file&name?.txt'
+
+echo "Создано:"
+find . -maxdepth 3 -type f -o -type d
