@@ -1,104 +1,58 @@
-#define FUSE_USE_VERSION 31
-#include <fuse.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <dirent.h>
-#include <sys/stat.h>
+import os
+import sys
+import subprocess
+from fusepy import FUSE, Operations
 
-static char *source_dir;  // Путь к исходной директории
+class ConverterFS(Operations):
+    def __init__(self, root):
+        self.root = root
 
-// Полный путь к файлу в исходной директории
-static char *get_source_path(const char *path) {
-    char *full_path = malloc(strlen(source_dir) + strlen(path) + 1);
-    sprintf(full_path, "%s%s", source_dir, path);
-    return full_path;
-}
+    def get_path(self, path):
+        return os.path.join(self.root, path.lstrip('/'))
 
-// Проверяем, есть ли PNG для виртуального JPG
-static int is_virtual_jpg(const char *path) {
-    return strstr(path, ".jpg") != NULL;
-}
+    def readdir(self, path, fh):
+        entries = ['.', '..']
+        real_path = self.get_path(path)
+        
+        for entry in os.listdir(real_path):
+            entries.append(entry)
+            if entry.endswith('.png'):
+                entries.append(entry.replace('.png', '.jpg'))  # Виртуальный JPG
+        return entries
 
-// Конвертируем PNG в JPG
-static void convert_png_to_jpg(const char *png_path, const char *jpg_path) {
-    char command[512];
-    snprintf(command, sizeof(command), "convert '%s' '%s'", png_path, jpg_path);
-    system(command);
-}
+    def getattr(self, path, fh=None):
+        real_path = self.get_path(path)
+        
+        # Для виртуальных JPG-файлов
+        if path.endswith('.jpg'):
+            png_path = real_path.replace('.jpg', '.png')
+            if not os.path.exists(png_path):
+                raise FileNotFoundError()
+            st = os.stat(png_path)
+            return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 'st_atime', 'st_mtime'))
+        
+        st = os.stat(real_path)
+        return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 'st_atime', 'st_mtime'))
 
-// Обработчик readdir: отображаем PNG + виртуальные JPG
-static int converter_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
-    (void) offset;
-    (void) fi;
+    def open(self, path, flags):
+        real_path = self.get_path(path)
+        
+        # Конвертация PNG в JPG при открытии
+        if path.endswith('.jpg'):
+            png_path = real_path.replace('.jpg', '.png')
+            if not os.path.exists(png_path):
+                raise FileNotFoundError()
+            subprocess.run(['convert', png_path, real_path], check=True)
+        
+        return os.open(real_path, flags)
 
-    DIR *dp;
-    struct dirent *de;
+    def read(self, path, size, offset, fh):
+        os.lseek(fh, offset, os.SEEK_SET)
+        return os.read(fh, size)
 
-    // Открываем исходную директорию
-    char *full_path = get_source_path(path);
-    dp = opendir(full_path);
-    if (dp == NULL) {
-        free(full_path);
-        return -errno;
-    }
-
-    // Читаем файлы
-    while ((de = readdir(dp)) != NULL) {
-        // Пропускаем скрытые файлы
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
-            continue;
-        }
-
-        // Добавляем файл в список
-        filler(buf, de->d_name, NULL, 0);
-
-        // Если это PNG — добавляем виртуальный JPG
-        if (strstr(de->d_name, ".png")) {
-            char jpg_name[256];
-            snprintf(jpg_name, sizeof(jpg_name), "%s.jpg", de->d_name);
-            filler(buf, jpg_name, NULL, 0);
-        }
-    }
-
-    closedir(dp);
-    free(full_path);
-    return 0;
-}
-
-// Обработчик open: конвертируем PNG в JPG при открытии
-static int converter_open(const char *path, struct fuse_file_info *fi) {
-    if (is_virtual_jpg(path)) {
-        char png_path[512], jpg_path[512];
-        snprintf(png_path, sizeof(png_path), "%s%s.png", source_dir, path);
-        snprintf(jpg_path, sizeof(jpg_path), "%s%s", source_dir, path);
-
-        // Если PNG существует — конвертируем
-        if (access(png_path, F_OK) == 0) {
-            convert_png_to_jpg(png_path, jpg_path);
-        } else {
-            return -ENOENT;
-        }
-    }
-
-    return 0;
-}
-
-// Остальные операции перенаправляем в исходную директорию
-static struct fuse_operations ops = {
-    .readdir = converter_readdir,
-    .open    = converter_open,
-    // Добавьте другие функции при необходимости (getattr, read, write)
-};
-
-int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <source_dir> <mount_dir>\n", argv[0]);
-        return 1;
-    }
-
-    source_dir = argv[argc-2];
-    argv[argc-1] = NULL;
-    return fuse_main(argc, argv, &ops, NULL);
-}
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
+        sys.exit(1)
+    
+    fuse = FUSE(ConverterFS(sys.argv[1]), sys.argv[2], foreground=True)
