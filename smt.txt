@@ -1,28 +1,21 @@
 import os
 import sys
+import errno
 import subprocess
 from llfuse import Operations, FUSEError
 from llfuse import init as fuse_init, main as fuse_main
 
 class ConverterFS(Operations):
     def __init__(self, root):
-        self.root = root
-        self.inode_count = 1  # Счётчик inode (упрощённо)
-        self.path_to_inode = {}  # Соответствие путей и inode
+        self.root = os.path.realpath(root)
+        self.inode_count = 1
+        self.path_to_inode = {'/': 1}  # Корневой inode
 
     def _get_path(self, inode):
-        """Получаем путь по inode (упрощённая реализация)"""
         for path, idx in self.path_to_inode.items():
             if idx == inode:
-                return path
+                return os.path.join(self.root, path.lstrip('/'))
         raise FUSEError(errno.ENOENT)
-
-    def _get_inode(self, path):
-        """Получаем или создаём inode для пути"""
-        if path not in self.path_to_inode:
-            self.path_to_inode[path] = self.inode_count
-            self.inode_count += 1
-        return self.path_to_inode[path]
 
     def getattr(self, inode, ctx):
         path = self._get_path(inode)
@@ -42,7 +35,9 @@ class ConverterFS(Operations):
     def lookup(self, parent_inode, name, ctx):
         parent_path = self._get_path(parent_inode)
         path = os.path.join(parent_path, name)
-        return self._get_inode(path)
+        if not os.path.exists(path):
+            raise FUSEError(errno.ENOENT)
+        return os.stat(path).st_ino
 
     def readdir(self, inode, offset):
         path = self._get_path(inode)
@@ -50,10 +45,10 @@ class ConverterFS(Operations):
         
         for entry in os.listdir(path):
             entry_path = os.path.join(path, entry)
-            entries.append((entry, self._get_inode(entry_path)))
+            entries.append((entry, os.stat(entry_path).st_ino))
             if entry.endswith('.png'):
-                jpg_path = entry_path.replace('.png', '.jpg')
-                entries.append((entry.replace('.png', '.jpg'), self._get_inode(jpg_path)))
+                jpg_entry = entry.replace('.png', '.jpg')
+                entries.append((jpg_entry, 0))  # Inode 0 для виртуальных файлов
         return entries
 
     def open(self, inode, flags, ctx):
@@ -69,12 +64,15 @@ if __name__ == '__main__':
         print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
         sys.exit(1)
 
-    fuse_init(
-        ConverterFS(sys.argv[1]),
-        sys.argv[2],
-        ['-o', 'allow_other', '-o', 'fsname=converterfs']
-    )
+    # Исправленные опции монтирования
+    mount_options = {
+        'allow_other': True,
+        'fsname': 'converterfs',
+        'subtype': 'fuse_converter'
+    }
+
     try:
+        fuse_init(ConverterFS(sys.argv[1]), sys.argv[2], mount_options)
         fuse_main()
     except KeyboardInterrupt:
         pass
