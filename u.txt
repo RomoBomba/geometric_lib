@@ -1,30 +1,83 @@
-#!/bin/bash
+import os
+import sys
+import subprocess
+from llfuse import Operations, FUSEError
+from llfuse import init as fuse_init, main as fuse_main
 
-set -e
+class ConverterFS(Operations):
+    def __init__(self, root):
+        self.root = root
+        self.inode_count = 1  # Счётчик inode (упрощённо)
+        self.path_to_inode = {}  # Соответствие путей и inode
 
-echo "Создание необычных файлов и каталогов..."
+    def _get_path(self, inode):
+        """Получаем путь по inode (упрощённая реализация)"""
+        for path, idx in self.path_to_inode.items():
+            if idx == inode:
+                return path
+        raise FUSEError(errno.ENOENT)
 
-touch "file with spaces.txt"
-touch "d d"
-mkdir "dir with space"
+    def _get_inode(self, path):
+        """Получаем или создаём inode для пути"""
+        if path not in self.path_to_inode:
+            self.path_to_inode[path] = self.inode_count
+            self.inode_count += 1
+        return self.path_to_inode[path]
 
-touch "-g"
-touch "\\path\\file"
-touch "??.txt"
-touch "&.txt"
-touch "|file|.txt"
-touch "#abc.txt"
-touch "'quote'.txt"
+    def getattr(self, inode, ctx):
+        path = self._get_path(inode)
+        try:
+            st = os.lstat(path)
+            return {
+                'st_mode': st.st_mode,
+                'st_size': st.st_size,
+                'st_atime': st.st_atime,
+                'st_mtime': st.st_mtime,
+                'st_uid': os.getuid(),
+                'st_gid': os.getgid()
+            }
+        except FileNotFoundError:
+            raise FUSEError(errno.ENOENT)
 
-touch ./--file.txt
+    def lookup(self, parent_inode, name, ctx):
+        parent_path = self._get_path(parent_inode)
+        path = os.path.join(parent_path, name)
+        return self._get_inode(path)
 
-touch $'file\nname.txt'
+    def readdir(self, inode, offset):
+        path = self._get_path(inode)
+        entries = [('.', inode), ('..', inode)]
+        
+        for entry in os.listdir(path):
+            entry_path = os.path.join(path, entry)
+            entries.append((entry, self._get_inode(entry_path)))
+            if entry.endswith('.png'):
+                jpg_path = entry_path.replace('.png', '.jpg')
+                entries.append((entry.replace('.png', '.jpg'), self._get_inode(jpg_path)))
+        return entries
 
-mkdir -p "dir with space/subdir?"
-mkdir -p $'nested\ndir'
+    def open(self, inode, flags, ctx):
+        path = self._get_path(inode)
+        if path.endswith('.jpg'):
+            png_path = path.replace('.jpg', '.png')
+            if os.path.exists(png_path):
+                subprocess.run(['convert', png_path, path], check=True)
+        return os.open(path, flags)
 
-touch "dir with space/subdir?/subfile#.txt"
-touch $'nested\ndir/file&name?.txt'
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
+        sys.exit(1)
 
-echo "Создано:"
-find . -maxdepth 3 -type f -o -type d
+    fuse_init(
+        ConverterFS(sys.argv[1]),
+        sys.argv[2],
+        ['-o', 'allow_other', '-o', 'fsname=converterfs']
+    )
+    try:
+        fuse_main()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        from llfuse import close as fuse_close
+        fuse_close()
