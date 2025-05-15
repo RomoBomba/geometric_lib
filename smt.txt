@@ -1,58 +1,52 @@
 import os
 import sys
 import subprocess
-from fusepy import FUSE, Operations
+from llfuse import Operations, Request, FUSEError
+from llfuse import init as fuse_init, main as fuse_main
 
 class ConverterFS(Operations):
     def __init__(self, root):
         self.root = root
 
-    def get_path(self, path):
-        return os.path.join(self.root, path.lstrip('/'))
+    def getattr(self, inode, ctx):
+        path = self._inode_to_path(inode)
+        st = os.lstat(path)
+        return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size'))
 
-    def readdir(self, path, fh):
-        entries = ['.', '..']
-        real_path = self.get_path(path)
+    def readdir(self, inode, offset):
+        path = self._inode_to_path(inode)
+        entries = [('.', None), ('..', None)]
         
-        for entry in os.listdir(real_path):
-            entries.append(entry)
+        for entry in os.listdir(path):
+            entries.append((entry, None))
             if entry.endswith('.png'):
-                entries.append(entry.replace('.png', '.jpg'))  # Виртуальный JPG
+                entries.append((entry.replace('.png', '.jpg'), None))
         return entries
 
-    def getattr(self, path, fh=None):
-        real_path = self.get_path(path)
-        
-        # Для виртуальных JPG-файлов
+    def open(self, inode, flags, ctx):
+        path = self._inode_to_path(inode)
         if path.endswith('.jpg'):
-            png_path = real_path.replace('.jpg', '.png')
-            if not os.path.exists(png_path):
-                raise FileNotFoundError()
-            st = os.stat(png_path)
-            return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 'st_atime', 'st_mtime'))
-        
-        st = os.stat(real_path)
-        return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 'st_atime', 'st_mtime'))
+            png_path = path.replace('.jpg', '.png')
+            if os.path.exists(png_path):
+                subprocess.run(['convert', png_path, path], check=True)
+        return os.open(path, flags)
 
-    def open(self, path, flags):
-        real_path = self.get_path(path)
-        
-        # Конвертация PNG в JPG при открытии
-        if path.endswith('.jpg'):
-            png_path = real_path.replace('.jpg', '.png')
-            if not os.path.exists(png_path):
-                raise FileNotFoundError()
-            subprocess.run(['convert', png_path, real_path], check=True)
-        
-        return os.open(real_path, flags)
-
-    def read(self, path, size, offset, fh):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, size)
+    def _inode_to_path(self, inode):
+        # Упрощенная логика (реальный код должен учитывать inode)
+        return os.path.join(self.root, str(inode))
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
         print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
         sys.exit(1)
-    
-    fuse = FUSE(ConverterFS(sys.argv[1]), sys.argv[2], foreground=True)
+
+    fuse_init(
+        ConverterFS(sys.argv[1]),
+        sys.argv[2],
+        ['-o', 'allow_other', '-o', 'fsname=converterfs']
+    )
+    try:
+        fuse_main()
+    finally:
+        from llfuse import close as fuse_close
+        fuse_close()
