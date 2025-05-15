@@ -1,97 +1,104 @@
-#!/bin/bash
-# backup.sh
+#define FUSE_USE_VERSION 31
+#include <fuse.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
-set -euo pipefail
+static char *source_dir;  // Путь к исходной директории
 
-SRC_DIR="/home/user/source"
-BACKUP_ROOT="/home/user"
-REPORT_FILE="/home/user/backup-report"
-TODAY=$(date +%F)
+// Полный путь к файлу в исходной директории
+static char *get_source_path(const char *path) {
+    char *full_path = malloc(strlen(source_dir) + strlen(path) + 1);
+    sprintf(full_path, "%s%s", source_dir, path);
+    return full_path;
+}
 
-mkdir -p "$SRC_DIR"
+// Проверяем, есть ли PNG для виртуального JPG
+static int is_virtual_jpg(const char *path) {
+    return strstr(path, ".jpg") != NULL;
+}
 
-# Проверка прав доступа
-if [ ! -r "$SRC_DIR" ]; then
-    echo "Error: Source directory '$SRC_DIR' is not readable." >&2
-    exit 1
-fi
+// Конвертируем PNG в JPG
+static void convert_png_to_jpg(const char *png_path, const char *jpg_path) {
+    char command[512];
+    snprintf(command, sizeof(command), "convert '%s' '%s'", png_path, jpg_path);
+    system(command);
+}
 
-if [ ! -w "$BACKUP_ROOT" ]; then
-    echo "Error: Cannot write to '$BACKUP_ROOT'. Check permissions." >&2
-    exit 1
-fi
+// Обработчик readdir: отображаем PNG + виртуальные JPG
+static int converter_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
+    (void) offset;
+    (void) fi;
 
-if [ ! -e "$REPORT_FILE" ]; then
-    touch "$REPORT_FILE" || {
-        echo "Error: Cannot create report file '$REPORT_FILE'." >&2
-        exit 1
+    DIR *dp;
+    struct dirent *de;
+
+    // Открываем исходную директорию
+    char *full_path = get_source_path(path);
+    dp = opendir(full_path);
+    if (dp == NULL) {
+        free(full_path);
+        return -errno;
     }
-fi
 
-# Найти самый свежий backup каталог
-latest_backup=$(find "$BACKUP_ROOT" -maxdepth 1 -type d -name 'Backup-*' 2>/dev/null | sort -r | head -n 1)
+    // Читаем файлы
+    while ((de = readdir(dp)) != NULL) {
+        // Пропускаем скрытые файлы
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+            continue;
+        }
 
-if [ -n "$latest_backup" ]; then
-    backup_date=$(basename "$latest_backup" | cut -d- -f2-)
-    if ! date -d "$backup_date" &>/dev/null; then
-        echo "Warning: Skipping invalid backup folder: $latest_backup" >&2
-        backup_date="1970-01-01"
-        seconds_diff=$((8 * 86400))
-    else
-        seconds_diff=$(( $(date +%s) - $(date -d "$backup_date" +%s) ))
-    fi
-else
-    seconds_diff=$((8 * 86400))
-    backup_date="1970-01-01"
-fi
+        // Добавляем файл в список
+        filler(buf, de->d_name, NULL, 0);
 
-if [ "$seconds_diff" -ge $((7 * 86400)) ]; then
-    # Создание нового бэкапа
-    new_backup="$BACKUP_ROOT/Backup-$TODAY"
-    if ! mkdir "$new_backup"; then
-        echo "Error: Could not create backup directory '$new_backup'." >&2
-        exit 1
-    fi
-    echo "[$TODAY] new backup folder created: Backup-$TODAY" >> "$REPORT_FILE"
+        // Если это PNG — добавляем виртуальный JPG
+        if (strstr(de->d_name, ".png")) {
+            char jpg_name[256];
+            snprintf(jpg_name, sizeof(jpg_name), "%s.jpg", de->d_name);
+            filler(buf, jpg_name, NULL, 0);
+        }
+    }
 
-    for file in "$SRC_DIR"/*; do
-        [ -f "$file" ] || continue
-        if ! cp -- "$file" "$new_backup/"; then
-            echo "Warning: Failed to copy file: $file" >&2
-            continue
-        fi
-        echo "$(basename "$file")" >> "$REPORT_FILE"
-    done
-else
-    # Обновление существующего бэкапа
-    echo "[$TODAY] updating backup folder: Backup-$backup_date" >> "$REPORT_FILE"
-    new_backup="$BACKUP_ROOT/Backup-$backup_date"
-    new_files=""
-    updated_files=""
+    closedir(dp);
+    free(full_path);
+    return 0;
+}
 
-    for file in "$SRC_DIR"/*; do
-        [ -f "$file" ] || continue
-        base="$(basename "$file")"
-        target="$new_backup/$base"
+// Обработчик open: конвертируем PNG в JPG при открытии
+static int converter_open(const char *path, struct fuse_file_info *fi) {
+    if (is_virtual_jpg(path)) {
+        char png_path[512], jpg_path[512];
+        snprintf(png_path, sizeof(png_path), "%s%s.png", source_dir, path);
+        snprintf(jpg_path, sizeof(jpg_path), "%s%s", source_dir, path);
 
-        if [ ! -f "$target" ]; then
-            if cp -- "$file" "$target"; then
-                new_files+="$base\n"
-            else
-                echo "Warning: Failed to copy new file: $file" >&2
-            fi
-        else
-            orig_size=$(stat -c %s "$target" 2>/dev/null || echo 0)
-            new_size=$(stat -c %s "$file" 2>/dev/null || echo 0)
-            if [ "$orig_size" -ne "$new_size" ]; then
-                if mv "$target" "$target.$TODAY" && cp "$file" "$target"; then
-                    updated_files+="$base $base.$TODAY\n"
-                else
-                    echo "Warning: Failed to version and replace file: $file" >&2
-                fi
-            fi
-        fi
-    done
+        // Если PNG существует — конвертируем
+        if (access(png_path, F_OK) == 0) {
+            convert_png_to_jpg(png_path, jpg_path);
+        } else {
+            return -ENOENT;
+        }
+    }
 
-    echo -e "$new_files$updated_files" >> "$REPORT_FILE"
-fi
+    return 0;
+}
+
+// Остальные операции перенаправляем в исходную директорию
+static struct fuse_operations ops = {
+    .readdir = converter_readdir,
+    .open    = converter_open,
+    // Добавьте другие функции при необходимости (getattr, read, write)
+};
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <source_dir> <mount_dir>\n", argv[0]);
+        return 1;
+    }
+
+    source_dir = argv[argc-2];
+    argv[argc-1] = NULL;
+    return fuse_main(argc, argv, &ops, NULL);
+}
