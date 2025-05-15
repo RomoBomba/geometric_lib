@@ -1,0 +1,54 @@
+import os
+import sys
+import errno
+from llfuse import Operations, FUSEError
+from llfuse import init as fuse_init, main as fuse_main
+
+class ConverterFS(Operations):
+    def __init__(self, root):
+        self.root = os.path.realpath(root)
+
+    def getattr(self, inode, ctx):
+        path = os.path.join(self.root, str(inode))
+        try:
+            st = os.lstat(path)
+            return {
+                'st_mode': st.st_mode,
+                'st_size': st.st_size,
+                'st_atime': st.st_atime,
+                'st_mtime': st.st_mtime,
+            }
+        except FileNotFoundError:
+            raise FUSEError(errno.ENOENT)
+
+    def readdir(self, inode, offset):
+        path = os.path.join(self.root, str(inode))
+        entries = [('.', inode), ('..', inode)]
+        
+        for entry in os.listdir(path):
+            entry_path = os.path.join(path, entry)
+            entries.append((entry, os.stat(entry_path).st_ino))
+            if entry.endswith('.png'):
+                entries.append((entry.replace('.png', '.jpg'), 9999))  # Фиктивный inode
+        return entries
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
+        sys.exit(1)
+
+    # Минимальные безопасные опции
+    mount_options = {
+        'allow_other': True,
+        'nonempty': True  # Разрешить монтирование в непустую директорию
+    }
+
+    try:
+        fuse_init(ConverterFS(sys.argv[1]), sys.argv[2], mount_options)
+        print("Filesystem mounted successfully. Press Ctrl+C to unmount.")
+        fuse_main()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        from llfuse import close as fuse_close
+        fuse_close()
