@@ -1,39 +1,68 @@
 import os
 import sys
 import subprocess
-from llfuse import Operations, Request, FUSEError
+from llfuse import Operations, FUSEError
 from llfuse import init as fuse_init, main as fuse_main
 
 class ConverterFS(Operations):
     def __init__(self, root):
         self.root = root
+        self.inode_count = 1  # Счётчик inode (упрощённо)
+        self.path_to_inode = {}  # Соответствие путей и inode
+
+    def _get_path(self, inode):
+        """Получаем путь по inode (упрощённая реализация)"""
+        for path, idx in self.path_to_inode.items():
+            if idx == inode:
+                return path
+        raise FUSEError(errno.ENOENT)
+
+    def _get_inode(self, path):
+        """Получаем или создаём inode для пути"""
+        if path not in self.path_to_inode:
+            self.path_to_inode[path] = self.inode_count
+            self.inode_count += 1
+        return self.path_to_inode[path]
 
     def getattr(self, inode, ctx):
-        path = self._inode_to_path(inode)
-        st = os.lstat(path)
-        return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size'))
+        path = self._get_path(inode)
+        try:
+            st = os.lstat(path)
+            return {
+                'st_mode': st.st_mode,
+                'st_size': st.st_size,
+                'st_atime': st.st_atime,
+                'st_mtime': st.st_mtime,
+                'st_uid': os.getuid(),
+                'st_gid': os.getgid()
+            }
+        except FileNotFoundError:
+            raise FUSEError(errno.ENOENT)
+
+    def lookup(self, parent_inode, name, ctx):
+        parent_path = self._get_path(parent_inode)
+        path = os.path.join(parent_path, name)
+        return self._get_inode(path)
 
     def readdir(self, inode, offset):
-        path = self._inode_to_path(inode)
-        entries = [('.', None), ('..', None)]
+        path = self._get_path(inode)
+        entries = [('.', inode), ('..', inode)]
         
         for entry in os.listdir(path):
-            entries.append((entry, None))
+            entry_path = os.path.join(path, entry)
+            entries.append((entry, self._get_inode(entry_path)))
             if entry.endswith('.png'):
-                entries.append((entry.replace('.png', '.jpg'), None))
+                jpg_path = entry_path.replace('.png', '.jpg')
+                entries.append((entry.replace('.png', '.jpg'), self._get_inode(jpg_path)))
         return entries
 
     def open(self, inode, flags, ctx):
-        path = self._inode_to_path(inode)
+        path = self._get_path(inode)
         if path.endswith('.jpg'):
             png_path = path.replace('.jpg', '.png')
             if os.path.exists(png_path):
                 subprocess.run(['convert', png_path, path], check=True)
         return os.open(path, flags)
-
-    def _inode_to_path(self, inode):
-        # Упрощенная логика (реальный код должен учитывать inode)
-        return os.path.join(self.root, str(inode))
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
@@ -47,6 +76,8 @@ if __name__ == '__main__':
     )
     try:
         fuse_main()
+    except KeyboardInterrupt:
+        pass
     finally:
         from llfuse import close as fuse_close
         fuse_close()
