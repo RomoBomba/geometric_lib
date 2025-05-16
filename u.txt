@@ -5,7 +5,7 @@ import shutil
 import zipfile
 import tarfile
 import time
-import stat  # Добавлен импорт модуля stat
+import stat
 from fuse import FUSE, Operations, LoggingMixIn
 
 class AutoUnzipFS(LoggingMixIn, Operations):
@@ -43,12 +43,11 @@ class AutoUnzipFS(LoggingMixIn, Operations):
         original_path = os.path.join(self.original_root, path.lstrip('/'))
         st = os.lstat(original_path) if os.path.exists(original_path) else None
 
-        # Виртуальные директории архивов
         for archive_path, temp_dir in self.temp_dirs.items():
             archive_name = os.path.splitext(os.path.basename(archive_path))[0]
             if path == f'/{archive_name}':
                 return {
-                    'st_mode': (0o555 | stat.S_IFDIR),  # Исправлено: stat.S_IFDIR
+                    'st_mode': (0o555 | stat.S_IFDIR),
                     'st_size': 0,
                     'st_atime': time.time(),
                     'st_mtime': time.time(),
@@ -64,10 +63,9 @@ class AutoUnzipFS(LoggingMixIn, Operations):
                     return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
                         'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink'))
 
-        # Обычные файлы и архивы
         if st and self._get_archive_type(original_path):
             return {
-                'st_mode': (0o444 | stat.S_IFREG),  # Исправлено: stat.S_IFREG
+                'st_mode': (0o444 | stat.S_IFREG),
                 'st_size': st.st_size,
                 'st_atime': st.st_atime,
                 'st_mtime': st.st_mtime,
@@ -77,12 +75,43 @@ class AutoUnzipFS(LoggingMixIn, Operations):
                 'st_nlink': st.st_nlink
             }
 
-        # Дефолтная обработка
         return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
             'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink')) if st else {}
 
-    # Остальные методы (readdir, read, mkdir, destroy) остаются без изменений
-    # ...
+    def readdir(self, path, fh):
+        entries = ['.', '..']
+        original_dir = os.path.join(self.original_root, path.lstrip('/'))
+
+        if os.path.isdir(original_dir):
+            entries += os.listdir(original_dir)
+
+        if path == '/':
+            for archive_path in os.listdir(self.original_root):
+                if self._get_archive_type(os.path.join(self.original_root, archive_path)):
+                    entries.append(os.path.splitext(archive_path)[0])
+
+        return entries
+
+    def read(self, path, size, offset, fh):
+        for archive_path, temp_dir in self.temp_dirs.items():
+            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+            if path.startswith(f'/{archive_name}/'):
+                virtual_path = os.path.join(temp_dir, path.split(f'/{archive_name}/')[1])
+                with open(virtual_path, 'rb') as f:
+                    f.seek(offset)
+                    return f.read(size)
+
+        original_path = os.path.join(self.original_root, path.lstrip('/'))
+        with open(original_path, 'rb') as f:
+            f.seek(offset)
+            return f.read(size)
+
+    def mkdir(self, path, mode):
+        os.mkdir(os.path.join(self.original_root, path.lstrip('/')), mode)
+
+    def destroy(self):
+        for temp_dir in self.temp_dirs.values():
+            shutil.rmtree(temp_dir)
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
@@ -94,5 +123,5 @@ if __name__ == '__main__':
         sys.argv[2],
         foreground=True,
         nothreads=True,
-        allow_other=True  # Разрешить доступ другим пользователям
+        allow_other=True
     )
