@@ -43,6 +43,7 @@ class AutoUnzipFS(LoggingMixIn, Operations):
         original_path = os.path.join(self.original_root, path.lstrip('/'))
         st = os.lstat(original_path) if os.path.exists(original_path) else None
 
+        # Проверка виртуальных директорий архивов
         for archive_path, temp_dir in self.temp_dirs.items():
             archive_name = os.path.splitext(os.path.basename(archive_path))[0]
             if path == f'/{archive_name}':
@@ -63,6 +64,7 @@ class AutoUnzipFS(LoggingMixIn, Operations):
                     return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
                         'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink'))
 
+        # Обработка обычных файлов и архивов
         if st and self._get_archive_type(original_path):
             return {
                 'st_mode': (0o444 | stat.S_IFREG),
@@ -75,8 +77,12 @@ class AutoUnzipFS(LoggingMixIn, Operations):
                 'st_nlink': st.st_nlink
             }
 
-        return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
-            'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink')) if st else {}
+        # Дефолтная обработка
+        if st:
+            return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
+                'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink'))
+        else:
+            return {}
 
     def readdir(self, path, fh):
         entries = ['.', '..']
@@ -85,31 +91,39 @@ class AutoUnzipFS(LoggingMixIn, Operations):
         if os.path.isdir(original_dir):
             entries += os.listdir(original_dir)
 
+        # Добавление виртуальных директорий архивов
         if path == '/':
-            for archive_path in os.listdir(self.original_root):
-                if self._get_archive_type(os.path.join(self.original_root, archive_path)):
-                    entries.append(os.path.splitext(archive_path)[0])
+            for entry in os.listdir(self.original_root):
+                entry_path = os.path.join(self.original_root, entry)
+                if self._get_archive_type(entry_path):
+                    entries.append(os.path.splitext(entry)[0])
 
         return entries
 
     def read(self, path, size, offset, fh):
+        # Обработка файлов внутри архивов
         for archive_path, temp_dir in self.temp_dirs.items():
             archive_name = os.path.splitext(os.path.basename(archive_path))[0]
             if path.startswith(f'/{archive_name}/'):
                 virtual_path = os.path.join(temp_dir, path.split(f'/{archive_name}/')[1])
-                with open(virtual_path, 'rb') as f:
-                    f.seek(offset)
-                    return f.read(size)
+                if os.path.exists(virtual_path):
+                    with open(virtual_path, 'rb') as f:
+                        f.seek(offset)
+                        return f.read(size)
 
+        # Обработка обычных файлов
         original_path = os.path.join(self.original_root, path.lstrip('/'))
-        with open(original_path, 'rb') as f:
-            f.seek(offset)
-            return f.read(size)
+        if os.path.exists(original_path):
+            with open(original_path, 'rb') as f:
+                f.seek(offset)
+                return f.read(size)
+        else:
+            raise FileNotFoundError(f"Path {original_path} does not exist")
 
     def mkdir(self, path, mode):
         os.mkdir(os.path.join(self.original_root, path.lstrip('/')), mode)
 
-    def destroy(self):
+    def destroy(self, path=None):  # Исправленная сигнатура
         for temp_dir in self.temp_dirs.values():
             shutil.rmtree(temp_dir)
 
