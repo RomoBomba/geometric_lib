@@ -1,81 +1,102 @@
 import os
 import sys
-import errno
-import subprocess
-from llfuse import Operations, FUSEError
-from llfuse import init as fuse_init, main as fuse_main
+import tempfile
+import shutil
+import zipfile
+import tarfile
+from fuse import FUSE, Operations, LoggingMixIn
 
-class ConverterFS(Operations):
-    def __init__(self, root):
-        self.root = os.path.realpath(root)
-        self.inode_count = 1
-        self.path_to_inode = {'/': 1}  # Корневой inode
+class AutoUnzipFS(LoggingMixIn, Operations):
+    def __init__(self, original_root):
+        self.original_root = original_root
+        self.temp_dirs = {}  # {archive_path: temp_dir}
 
-    def _get_path(self, inode):
-        for path, idx in self.path_to_inode.items():
-            if idx == inode:
-                return os.path.join(self.root, path.lstrip('/'))
-        raise FUSEError(errno.ENOENT)
+    def _get_archive_type(self, path):
+        if path.endswith('.zip'):
+            return 'zip'
+        elif path.endswith('.tar.gz') or path.endswith('.tgz'):
+            return 'tar.gz'
+        return None
 
-    def getattr(self, inode, ctx):
-        path = self._get_path(inode)
+    def _extract_archive(self, archive_path, archive_type):
+        if archive_path in self.temp_dirs:
+            return self.temp_dirs[archive_path]
+
+        temp_dir = tempfile.mkdtemp()
         try:
-            st = os.lstat(path)
-            return {
-                'st_mode': st.st_mode,
-                'st_size': st.st_size,
-                'st_atime': st.st_atime,
-                'st_mtime': st.st_mtime,
-                'st_uid': os.getuid(),
-                'st_gid': os.getgid()
-            }
-        except FileNotFoundError:
-            raise FUSEError(errno.ENOENT)
+            if archive_type == 'zip':
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+            elif archive_type == 'tar.gz':
+                with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                    tar_ref.extractall(temp_dir)
+            self.temp_dirs[archive_path] = temp_dir
+            return temp_dir
+        except Exception as e:
+            shutil.rmtree(temp_dir)
+            raise e
 
-    def lookup(self, parent_inode, name, ctx):
-        parent_path = self._get_path(parent_inode)
-        path = os.path.join(parent_path, name)
-        if not os.path.exists(path):
-            raise FUSEError(errno.ENOENT)
-        return os.stat(path).st_ino
-
-    def readdir(self, inode, offset):
-        path = self._get_path(inode)
-        entries = [('.', inode), ('..', inode)]
+    def getattr(self, path, fh=None):
+        original_path = os.path.join(self.original_root, path.lstrip('/'))
         
-        for entry in os.listdir(path):
-            entry_path = os.path.join(path, entry)
-            entries.append((entry, os.stat(entry_path).st_ino))
-            if entry.endswith('.png'):
-                jpg_entry = entry.replace('.png', '.jpg')
-                entries.append((jpg_entry, 0))  # Inode 0 для виртуальных файлов
+        # Если это виртуальная директория архива
+        if os.path.basename(path) in self.temp_dirs.values():
+            return dict(st_mode=(0o555 | os.S_IFDIR), st_size=0
+        
+        # Проверка на архив
+        archive_type = self._get_archive_type(original_path)
+        if archive_type:
+            return dict(st_mode=(0o444 | os.S_IFREG), st_size=os.path.getsize(original_path)
+        
+        return os.lstat(original_path)
+
+    def readdir(self, path, fh):
+        original_dir = os.path.join(self.original_root, path.lstrip('/'))
+        entries = ['.', '..']
+        
+        # Добавить оригинальные файлы
+        entries += os.listdir(original_dir)
+        
+        # Добавить виртуальные директории для архивов
+        for entry in os.listdir(original_dir):
+            entry_path = os.path.join(original_dir, entry)
+            if self._get_archive_type(entry_path):
+                entries.append(os.path.splitext(entry)[0])
+        
         return entries
 
-    def open(self, inode, flags, ctx):
-        path = self._get_path(inode)
-        if path.endswith('.jpg'):
-            png_path = path.replace('.jpg', '.png')
-            if os.path.exists(png_path):
-                subprocess.run(['convert', png_path, path], check=True)
-        return os.open(path, flags)
+    def read(self, path, size, offset, fh):
+        # Обработка файлов внутри виртуальных директорий
+        if '/' in path:
+            archive_part, file_in_archive = path.split('/', 1)
+            archive_name = archive_part + self._get_archive_type(archive_part)
+            archive_path = os.path.join(self.original_root, archive_name)
+            
+            if archive_path in self.temp_dirs:
+                temp_dir = self.temp_dirs[archive_path]
+                file_path = os.path.join(temp_dir, file_in_archive)
+                with open(file_path, 'rb') as f:
+                    f.seek(offset)
+                    return f.read(size)
+        
+        # Обычный файл
+        original_path = os.path.join(self.original_root, path.lstrip('/'))
+        with open(original_path, 'rb') as f:
+            f.seek(offset)
+            return f.read(size)
+
+    def mkdir(self, path, mode):
+        # Все операции создания директорий перенаправляются в оригинальную директорию
+        os.mkdir(os.path.join(self.original_root, path.lstrip('/')), mode)
+
+    def destroy(self):
+        # Очистка временных директорий
+        for temp_dir in self.temp_dirs.values():
+            shutil.rmtree(temp_dir)
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
+        print(f"Usage: {sys.argv[0]} <original_dir> <mount_point>")
         sys.exit(1)
-
-    # Исправленные опции монтирования
-    mount_options = {
-        'allow_other': True,
-        'fsname': 'converterfs',
-        'subtype': 'fuse_converter'
-    }
-
-    try:
-        fuse_init(ConverterFS(sys.argv[1]), sys.argv[2], mount_options)
-        fuse_main()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        from llfuse import close as fuse_close
-        fuse_close()
+    
+    FUSE(AutoUnzipFS(sys.argv[1]), sys.argv[2], foreground=True, nothreads=True)
