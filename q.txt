@@ -1,54 +1,228 @@
+#!/usr/bin/env python3
+
 import os
 import sys
+import tempfile
+import shutil
+import zipfile
+import tarfile
+import time
+import stat
 import errno
-from llfuse import Operations, FUSEError
-from llfuse import init as fuse_init, main as fuse_main
+import logging
+from fuse import FUSE, Operations
 
-class ConverterFS(Operations):
-    def __init__(self, root):
-        self.root = os.path.realpath(root)
+# Настройка логирования
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger('AutoUnzipFS')
 
-    def getattr(self, inode, ctx):
-        path = os.path.join(self.root, str(inode))
+
+def remove_prefix(text, prefix):
+    """Аналог str.removeprefix() для старых версий Python"""
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
+class AutoUnzipFS(Operations):
+    def __init__(self, original_root):
+        self.original_root = os.path.abspath(original_root)
+        self.temp_dirs = {}  # path -> temp_dir
+        log.debug(f"Original root: {self.original_root}")
+
+    def _get_archive_type(self, path):
+        if path.endswith('.zip'):
+            return 'zip'
+        elif path.endswith('.tar.gz') or path.endswith('.tgz'):
+            return 'tar.gz'
+        elif path.endswith('.tar.bz2'):
+            return 'tar.bz2'
+        elif path.endswith('.tar.xz'):
+            return 'tar.xz'
+        return None
+
+    def _extract_archive(self, archive_path):
+        if archive_path in self.temp_dirs:
+            return self.temp_dirs[archive_path]
+
+        temp_dir = tempfile.mkdtemp()
+        log.debug(f"Extracting {archive_path} to {temp_dir}")
         try:
-            st = os.lstat(path)
-            return {
-                'st_mode': st.st_mode,
-                'st_size': st.st_size,
-                'st_atime': st.st_atime,
-                'st_mtime': st.st_mtime,
-            }
-        except FileNotFoundError:
-            raise FUSEError(errno.ENOENT)
+            archive_type = self._get_archive_type(archive_path)
+            if archive_type == 'zip':
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+            elif archive_type == 'tar.gz':
+                with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                    tar_ref.extractall(temp_dir)
+            elif archive_type == 'tar.bz2':
+                with tarfile.open(archive_path, 'r:bz2') as tar_ref:
+                    tar_ref.extractall(temp_dir)
+            elif archive_type == 'tar.xz':
+                with tarfile.open(archive_path, 'r:xz') as tar_ref:
+                    tar_ref.extractall(temp_dir)
 
-    def readdir(self, inode, offset):
-        path = os.path.join(self.root, str(inode))
-        entries = [('.', inode), ('..', inode)]
-        
-        for entry in os.listdir(path):
-            entry_path = os.path.join(path, entry)
-            entries.append((entry, os.stat(entry_path).st_ino))
-            if entry.endswith('.png'):
-                entries.append((entry.replace('.png', '.jpg'), 9999))  # Фиктивный inode
+            self.temp_dirs[archive_path] = temp_dir
+            return temp_dir
+        except Exception as e:
+            log.error(f"Failed to extract {archive_path}: {e}")
+            shutil.rmtree(temp_dir)
+            raise
+
+    def getattr(self, path, fh=None):
+        log.debug(f"getattr({path})")
+        original_path = os.path.join(self.original_root, path.lstrip('/'))
+
+        # Проверяем оригинальную систему
+        st = None
+        if os.path.exists(original_path):
+            st = os.lstat(original_path)
+
+        # Проверяем, не является ли это виртуальным каталогом архива
+        for archive_path, temp_dir in self.temp_dirs.items():
+            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+            if path == f'/{archive_name}':
+                return {
+                    'st_mode': (stat.S_IFDIR | 0o555),
+                    'st_size': 0,
+                    'st_atime': time.time(),
+                    'st_mtime': time.time(),
+                    'st_ctime': time.time(),
+                    'st_uid': os.getuid(),
+                    'st_gid': os.getgid(),
+                    'st_nlink': 2
+                }
+            if path.startswith(f'/{archive_name}/'):
+                virtual_relpath = remove_prefix(path, f'/{archive_name}/')
+                virtual_path = os.path.join(temp_dir, virtual_relpath)
+                if os.path.exists(virtual_path):
+                    st = os.lstat(virtual_path)
+                    return {
+                        key: getattr(st, key)
+                        for key in (
+                            'st_mode', 'st_ino', 'st_dev',
+                            'st_nlink', 'st_uid', 'st_gid',
+                            'st_size', 'st_atime', 'st_mtime',
+                            'st_ctime', 'st_blocks', 'st_blksize'
+                        )
+                    }
+
+        if st:
+            if self._get_archive_type(original_path):
+                # Представляем архив как обычный файл, но только для чтения
+                return {
+                    'st_mode': (stat.S_IFREG | 0o444),
+                    'st_size': st.st_size,
+                    'st_atime': st.st_atime,
+                    'st_mtime': st.st_mtime,
+                    'st_ctime': st.st_ctime,
+                    'st_uid': st.st_uid,
+                    'st_gid': st.st_gid,
+                    'st_nlink': st.st_nlink
+                }
+            else:
+                # Возвращаем статус реального файла/каталога
+                return {
+                    key: getattr(st, key)
+                    for key in (
+                        'st_mode', 'st_ino', 'st_dev',
+                        'st_nlink', 'st_uid', 'st_gid',
+                        'st_size', 'st_atime', 'st_mtime',
+                        'st_ctime', 'st_blocks', 'st_blksize'
+                    )
+                }
+
+        return -errno.ENOENT
+
+    def readdir(self, path, fh):
+        log.debug(f"readdir({path})")
+        entries = ['.', '..']
+        original_dir = os.path.join(self.original_root, path.lstrip('/'))
+
+        # Содержимое оригинальной директории
+        if os.path.isdir(original_dir):
+            for item in os.listdir(original_dir):
+                full_path = os.path.join(original_dir, item)
+                if not self._get_archive_type(full_path):
+                    entries.append(item)
+
+        # Содержимое распакованных архивов
+        for archive_path, temp_dir in self.temp_dirs.items():
+            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+            if path == f'/{archive_name}':
+                entries += os.listdir(temp_dir)
+
         return entries
+
+    def read(self, path, size, offset, fh):
+        log.debug(f"read({path}, {size}, {offset})")
+        for archive_path, temp_dir in self.temp_dirs.items():
+            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+            if path.startswith(f'/{archive_name}/'):
+                virtual_relpath = remove_prefix(path, f'/{archive_name}/')
+                virtual_path = os.path.join(temp_dir, virtual_relpath)
+                if not os.path.exists(virtual_path):
+                    log.error(f"Virtual file not found: {virtual_path}")
+                    return -errno.ENOENT
+
+                with open(virtual_path, 'rb') as f:
+                    f.seek(offset)
+                    return f.read(size)
+
+        original_path = os.path.join(self.original_root, path.lstrip('/'))
+        if not os.path.exists(original_path):
+            log.error(f"Original file not found: {original_path}")
+            return -errno.ENOENT
+
+        with open(original_path, 'rb') as f:
+            f.seek(offset)
+            return f.read(size)
+
+    def destroy(self, path):
+        log.debug("destroy()")
+        for temp_dir in self.temp_dirs.values():
+            try:
+                shutil.rmtree(temp_dir)
+                log.debug(f"Removed temp dir: {temp_dir}")
+            except Exception as e:
+                log.warning(f"Failed to remove temp dir {temp_dir}: {e}")
+
+    # Остальные методы заглушки (не поддерживают запись)
+    def open(self, path, flags):
+        return 0
+
+    def opendir(self, path):
+        return 0
+
+    def release(self, path, fh):
+        return 0
+
+    def releasedir(self, path, fh):
+        return 0
+
+    def mkdir(self, path, mode):
+        return -errno.EROFS  # Только для чтения
+
+    def mknod(self, path, mode, dev):
+        return -errno.EROFS
+
+    def write(self, path, data, offset, fh):
+        return -errno.EROFS
+
+    def create(self, path, mode, fi=None):
+        return -errno.EROFS
+
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <source_dir> <mount_dir>")
+        print(f"Usage: {sys.argv[0]} <original_dir> <mount_point>")
         sys.exit(1)
 
-    # Минимальные безопасные опции
-    mount_options = {
-        'allow_other': True,
-        'nonempty': True  # Разрешить монтирование в непустую директорию
-    }
-
-    try:
-        fuse_init(ConverterFS(sys.argv[1]), sys.argv[2], mount_options)
-        print("Filesystem mounted successfully. Press Ctrl+C to unmount.")
-        fuse_main()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        from llfuse import close as fuse_close
-        fuse_close()
+    FUSE(
+        AutoUnzipFS(sys.argv[1]),
+        sys.argv[2],
+        foreground=True,
+        nothreads=True,
+        allow_other=False,
+        debug=True
+    )
