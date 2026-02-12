@@ -2,81 +2,86 @@
 
 file="work3.log"
 
-echo "=== 1. cписок пользователей ==="
+echo " 1. cписок пользователей "
 cut -d: -f1,3,4,6,7 /etc/passwd | while IFS=: read user uid gid home shell; do
-    echo "$user:$uid:$gid:$home:$shell" >> $file
+echo "$user:$uid:$gid:$home:$shell" >> $file
 done
 
-echo "=== 2. дата последней смены пароля root ==="
-chage -l root | grep "last password change" | cut -d: -f2- >> $file
+echo " 2. дата последней смены пароля root "
+echo "" >> $file
+chage -l root | grep -i "last password change" | cut -d: -f2- >> $file
 
-echo "=== 3. список всех групп ==="
+echo " 3. список всех групп "
+echo "" >> $file
 cut -d: -f1 /etc/group | paste -sd ',' >> $file
 
-echo "=== 4. настройка /etc/skel ==="
+echo " 4. настройка /etc/skel "
 echo "Be careful!" > /etc/skel/readme.txt
 
-echo "=== 5. создание пользователя u1 ==="
-useradd -m -p "$(openssl passwd -6 12345678)" u1
+echo " 5. создание пользователя u1 "
+useradd -m -p "$(openssl passwd -1 12345678)" u1
 
-echo "=== 6. создание группы g1 ==="
+echo " 6. создание группы g1 "
 groupadd g1
 
-echo "=== 7. добавление u1 в группу g1 ==="
+echo " 7. добавление u1 в группу g1 "
 usermod -a -G g1 u1
 
-echo "=== 8. информация о u1 ==="
+echo " 8. информация о u1 "
+echo "" >> $file
 echo "u1: uid=$(id -u u1), группы: $(id -Gn u1 | tr ' ' ',')" >> $file
 
-echo "=== 9. пользователь myuser и группа g1 ==="
+echo " 9. пользователь myuser и группа g1 "
 if ! id myuser &>/dev/null; then
 useradd -m myuser
 fi
 usermod -a -G g1 myuser
 
-echo "=== 10. состав группы g1 ==="
-getent group g1 | cut -d: -f4 | tr ',' '\n' | sort | paste -sd ',' >> $file
+echo " 10. состав группы g1 "
+echo "" >> $file
+getent group g1 | cut -d: -f4 | paste -sd ',' >> $file
 
-echo "=== 11. настройка u1 = /usr/bin/mc ==="
+echo " 11. настройка u1 = /usr/bin/mc "
 if ! command -v mc &>/dev/null; then
 apt update && apt install -y mc
 fi
 chsh -s /usr/bin/mc u1
 
-echo "=== 12. создание пользователя u2 ==="
-useradd -m -p "$(openssl passwd -6 87654321)" u2
+echo " 12. создание пользователя u2 "
+useradd -m -p "$(openssl passwd -1 87654321)" u2
 
-echo "=== 13. каталог /home/test13 и копии work3.log ==="
+echo " 13. каталог /home/test13 и копии work3.log "
 mkdir -p /home/test13
 cp $file /home/test13/work3-1.log
 cp $file /home/test13/work3-2.log
 
-echo "=== 14. права на /home/test13 ==="
+echo " 14. права на /home/test13 "
 groupadd test13group
 usermod -a -G test13group u1
 usermod -a -G test13group u2
 chown -R u1:test13group /home/test13
 chmod u=rwx,g=rx,o= /home/test13
-find /home/test13 -type f -exec chmod u=rw,g=r,o= {} \;
+chmod u=rw,g=r,o= /home/test13/work3-1.log
+chmod u=rw,g=r,o= /home/test13/work3-2.log
 
-echo "=== 15. каталог /home/test14 ==="
+echo " 15. каталог /home/test14 "
 mkdir -p /home/test14
 chown u1:u1 /home/test14
 chmod u=rwx,g=rwx,o=rwx,+t /home/test14
 
-echo "=== 16. nano для редактирования файлов из test13 ==="
+echo " 16. nano для редактирования файлов из test13 "
 cp $(which nano) /home/test14/
 chown u1:u1 /home/test14/nano
 chmod u+s /home/test14/nano
 
-echo "=== 17. секретный каталог test15 ==="
+echo " 17. секретный каталог test15 "
 mkdir -p /home/test15
-echo "is a secret file." > /home/test15/secret_file
+echo "secret file" > /home/test15/secret_file
 chmod u=rw,g=r,o=r /home/test15/secret_file
 chmod u=wx,g=x,o=x /home/test15
 
-echo "=== 18. sudo-права для u1 ==="
+echo " 18. sudo-права для u1 "
 echo "u1 ALL=(ALL) /usr/bin/passwd" > /etc/sudoers.d/u1-passwd
 chmod u=r,g=r,o= /etc/sudoers.d/u1-passwd
 
-echo "cкрипт завершёнm, результаты в файле $file."
+echo "скрипт завершён, результаты в файле $file."
