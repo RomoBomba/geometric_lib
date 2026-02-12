@@ -1,96 +1,31 @@
 #!/bin/bash
 
-# Имя вашего основного сетевого интерфейса (ЗАМЕНИТЕ НА СВОЙ!)
-INTERFACE="ens33"
+echo "=== удаление пользователей, групп, файлов и настроек ==="
 
-# Функция для паузы
-pause() {
-    read -p "Нажмите [Enter] для продолжения..."
-}
-
-# Функция для очистки экрана
-clear_screen() {
-    clear
-}
-
-while true; do
-    clear_screen
-    echo "====================================="
-    echo "    Сетевой конфигуратор"
-    echo "====================================="
-    echo "1. Информация о сетевой карте и канале"
-    echo "2. Текущая конфигурация IPv4"
-    echo "3. Настройка по Сценарию #1 (Статический 10.100.0.2)"
-    echo "4. Настройка по Сценарию #2 (Динамический DHCP)"
-    echo "5. Выход"
-    echo "====================================="
-    read -p "Выберите пункт меню [1-5]: " choice
-
-    case $choice in
-        1)
-            clear_screen
-            echo "=== Информация о сетевой карте ==="
-            # Модель сетевой карты (через lshw)
-            echo "Модель сетевой карты:"
-            sudo lshw -class network | grep -E "product|description" | head -2
-            echo ""
-            # Информация о канале (через ethtool)
-            echo "Скорость, дуплекс и линк:"
-            sudo ethtool $INTERFACE | grep -E "Speed|Duplex|Link detected"
-            echo ""
-            # MAC-адрес
-            echo "MAC-адрес:"
-            cat /sys/class/net/$INTERFACE/address
-            echo ""
-            pause
-            ;;
-        2)
-            clear_screen
-            echo "=== Текущая конфигурация IPv4 ==="
-            # IP и маска
-            ip addr show $INTERFACE | grep inet
-            # Шлюз по умолчанию
-            echo "Шлюз по умолчанию:"
-            ip route | grep default
-            # DNS-серверы
-            echo "DNS-серверы:"
-            cat /etc/resolv.conf | grep nameserver
-            pause
-            ;;
-        3)
-            clear_screen
-            echo "=== Настройка статического адреса (10.100.0.3) ==="
-            # Сначала сбрасываем интерфейс, убирая старые адреса
-            sudo ip addr flush dev $INTERFACE
-            # Добавляем статический IP и маску
-            sudo ip addr add 10.100.0.3/24 dev $INTERFACE
-            # Поднимаем интерфейс
-            sudo ip link set $INTERFACE up
-            # Добавляем шлюз по умолчанию
-            sudo ip route add default via 10.100.0.1
-            # Прописываем DNS (это изменение НЕ временное, т.к. пишем в файл)
-            echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-            echo "Статическая настройка применена."
-            echo "IP: 10.100.0.2, Mask: 255.255.255.0, Gate: 10.100.0.1, DNS: 8.8.8.8"
-            pause
-            ;;
-        4)
-            clear_screen
-            echo "=== Запрос конфигурации по DHCP ==="
-            # Освобождаем старый DHCP-lease (если был) и запрашиваем новый
-            sudo dhclient -r $INTERFACE
-            sudo dhclient $INTERFACE
-            echo "Динамическая настройка (DHCP) применена."
-            pause
-            ;;
-        5)
-            clear_screen
-            echo "Выход..."
-            exit 0
-            ;;
-        *)
-            echo "Неверный выбор. Попробуйте снова."
-            pause
-            ;;
-    esac
+for u in u1 u2 myuser; do
+if id $u &>/dev/null; then
+userdel -r $u
+echo "пользователь $u удалён"
+fi
 done
+
+for g in g1 test13group; do
+if getent group $g &>/dev/null; then
+groupdel $g
+echo "группа $g удалена"
+fi
+done
+
+rm -rf /home/test13 /home/test14 /home/test15
+echo "каталоги удалены"
+
+rm -f /etc/skel/readme.txt
+echo "файл readme.txt удалён"
+
+rm -f /etc/sudoers.d/u1-passwd
+echo "правила для u1 удалены"
+
+rm -f work3.log
+echo "лог-файл work3.log удалён"
+
+echo "очистка завершена."
