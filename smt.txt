@@ -1,127 +1,82 @@
-import os
-import sys
-import tempfile
-import shutil
-import zipfile
-import tarfile
-import time
-import stat
-from fuse import FUSE, Operations, LoggingMixIn
+#!/bin/bash
 
-class AutoUnzipFS(LoggingMixIn, Operations):
-    def __init__(self, original_root):
-        self.original_root = os.path.abspath(original_root)
-        self.temp_dirs = {}
+file="work3.log"
 
-    def _get_archive_type(self, path):
-        if path.endswith('.zip'):
-            return 'zip'
-        elif path.endswith('.tar.gz') or path.endswith('.tgz'):
-            return 'tar.gz'
-        return None
+echo "=== 1. cписок пользователей ==="
+cut -d: -f1,3,4,6,7 /etc/passwd | while IFS=: read user uid gid home shell; do
+    echo "$user:$uid:$gid:$home:$shell" >> $file
+done
 
-    def _extract_archive(self, archive_path):
-        if archive_path in self.temp_dirs:
-            return self.temp_dirs[archive_path]
+echo "=== 2. дата последней смены пароля root ==="
+chage -l root | grep "last password change" | cut -d: -f2- >> $file
 
-        temp_dir = tempfile.mkdtemp()
-        try:
-            archive_type = self._get_archive_type(archive_path)
-            if archive_type == 'zip':
-                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-            elif archive_type == 'tar.gz':
-                with tarfile.open(archive_path, 'r:gz') as tar_ref:
-                    tar_ref.extractall(temp_dir)
-            self.temp_dirs[archive_path] = temp_dir
-            return temp_dir
-        except Exception as e:
-            shutil.rmtree(temp_dir)
-            raise e
+echo "=== 3. список всех групп ==="
+cut -d: -f1 /etc/group | paste -sd ',' >> $file
 
-    def getattr(self, path, fh=None):
-        original_path = os.path.join(self.original_root, path.lstrip('/'))
-        st = os.lstat(original_path) if os.path.exists(original_path) else None
+echo "=== 4. настройка /etc/skel ==="
+echo "Be careful!" > /etc/skel/readme.txt
 
-        for archive_path, temp_dir in self.temp_dirs.items():
-            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
-            if path == f'/{archive_name}':
-                return {
-                    'st_mode': (0o555 | stat.S_IFDIR),
-                    'st_size': 0,
-                    'st_atime': time.time(),
-                    'st_mtime': time.time(),
-                    'st_ctime': time.time(),
-                    'st_uid': os.getuid(),
-                    'st_gid': os.getgid(),
-                    'st_nlink': 2
-                }
-            if path.startswith(f'/{archive_name}/'):
-                virtual_path = os.path.join(temp_dir, path.split(f'/{archive_name}/')[1])
-                if os.path.exists(virtual_path):
-                    st = os.lstat(virtual_path)
-                    return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
-                        'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink'))
+echo "=== 5. создание пользователя u1 ==="
+useradd -m -p "$(openssl passwd -6 12345678)" u1
 
-        if st and self._get_archive_type(original_path):
-            return {
-                'st_mode': (0o444 | stat.S_IFREG),
-                'st_size': st.st_size,
-                'st_atime': st.st_atime,
-                'st_mtime': st.st_mtime,
-                'st_ctime': st.st_ctime,
-                'st_uid': st.st_uid,
-                'st_gid': st.st_gid,
-                'st_nlink': st.st_nlink
-            }
+echo "=== 6. создание группы g1 ==="
+groupadd g1
 
-        return dict((key, getattr(st, key)) for key in ('st_mode', 'st_size', 
-            'st_atime', 'st_mtime', 'st_ctime', 'st_uid', 'st_gid', 'st_nlink')) if st else {}
+echo "=== 7. добавление u1 в группу g1 ==="
+usermod -a -G g1 u1
 
-    def readdir(self, path, fh):
-        entries = ['.', '..']
-        original_dir = os.path.join(self.original_root, path.lstrip('/'))
+echo "=== 8. информация о u1 ==="
+echo "u1: uid=$(id -u u1), группы: $(id -Gn u1 | tr ' ' ',')" >> $file
 
-        if os.path.isdir(original_dir):
-            entries += os.listdir(original_dir)
+echo "=== 9. пользователь myuser и группа g1 ==="
+if ! id myuser &>/dev/null; then
+useradd -m myuser
+fi
+usermod -a -G g1 myuser
 
-        if path == '/':
-            for archive_path in os.listdir(self.original_root):
-                if self._get_archive_type(os.path.join(self.original_root, archive_path)):
-                    entries.append(os.path.splitext(archive_path)[0])
+echo "=== 10. состав группы g1 ==="
+getent group g1 | cut -d: -f4 | tr ',' '\n' | sort | paste -sd ',' >> $file
 
-        return entries
+echo "=== 11. настройка u1 = /usr/bin/mc ==="
+if ! command -v mc &>/dev/null; then
+apt update && apt install -y mc
+fi
+chsh -s /usr/bin/mc u1
 
-    def read(self, path, size, offset, fh):
-        for archive_path, temp_dir in self.temp_dirs.items():
-            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
-            if path.startswith(f'/{archive_name}/'):
-                virtual_path = os.path.join(temp_dir, path.split(f'/{archive_name}/')[1])
-                with open(virtual_path, 'rb') as f:
-                    f.seek(offset)
-                    return f.read(size)
+echo "=== 12. создание пользователя u2 ==="
+useradd -m -p "$(openssl passwd -6 87654321)" u2
 
-        original_path = os.path.join(self.original_root, path.lstrip('/'))
-        with open(original_path, 'rb') as f:
-            f.seek(offset)
-            return f.read(size)
+echo "=== 13. каталог /home/test13 и копии work3.log ==="
+mkdir -p /home/test13
+cp $file /home/test13/work3-1.log
+cp $file /home/test13/work3-2.log
 
-    def mkdir(self, path, mode):
-        os.mkdir(os.path.join(self.original_root, path.lstrip('/')), mode)
+echo "=== 14. права на /home/test13 ==="
+groupadd test13group
+usermod -a -G test13group u1
+usermod -a -G test13group u2
+chown -R u1:test13group /home/test13
+chmod u=rwx,g=rx,o= /home/test13
+find /home/test13 -type f -exec chmod u=rw,g=r,o= {} \;
 
-    def destroy(self):
-        for temp_dir in self.temp_dirs.values():
-            shutil.rmtree(temp_dir)
+echo "=== 15. каталог /home/test14 ==="
+mkdir -p /home/test14
+chown u1:u1 /home/test14
+chmod u=rwx,g=rwx,o=rwx,+t /home/test14
 
-if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <original_dir> <mount_point>")
-        sys.exit(1)
+echo "=== 16. nano для редактирования файлов из test13 ==="
+cp $(which nano) /home/test14/
+chown u1:u1 /home/test14/nano
+chmod u+s /home/test14/nano
 
-    FUSE(
-        AutoUnzipFS(sys.argv[1]),
-        sys.argv[2],
-        foreground=True,
-        nothreads=True,
-        allow_other=True
-    )
+echo "=== 17. секретный каталог test15 ==="
+mkdir -p /home/test15
+echo "is a secret file." > /home/test15/secret_file
+chmod u=rw,g=r,o=r /home/test15/secret_file
+chmod u=wx,g=x,o=x /home/test15
+
+echo "=== 18. sudo-права для u1 ==="
+echo "u1 ALL=(ALL) /usr/bin/passwd" > /etc/sudoers.d/u1-passwd
+chmod u=r,g=r,o= /etc/sudoers.d/u1-passwd
+
+echo "cкрипт завершёнm, результаты в файле $file."
